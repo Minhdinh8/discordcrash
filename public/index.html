@@ -1,0 +1,195 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Crash Game - Control Panel</title>
+  <script src="/socket.io/socket.io.js"></script>
+  <style>
+    body { font-family: Inter, system-ui, Arial; padding: 20px; max-width: 1000px; margin: auto; }
+    .card { padding: 12px; border: 1px solid #ddd; border-radius: 8px; margin-bottom: 12px; }
+    .mult { font-size: 48px; font-weight: 700; }
+    button { padding: 8px 12px; border-radius: 6px; cursor: pointer; }
+    input, select { padding: 8px; margin-right: 8px; }
+    label { display: inline-block; margin-right: 12px; }
+    .small { font-size: 12px; color: #666; }
+    table { width: 100%; border-collapse: collapse; }
+    td, th { border: 1px solid #eee; padding: 6px; text-align: left; }
+    .flex { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  </style>
+</head>
+<body>
+  <h1>Crash Game — Control Panel</h1>
+
+  <div class="card">
+    <h3>Create Session</h3>
+    <div class="flex">
+      <label>Channel ID: <input id="channelId" placeholder="Discord channel ID"></label>
+      <label>Guild ID: <input id="guildId" placeholder="Guild ID (optional)"></label>
+      <label>Round length ms: <input id="roundLength" value="8000"></label>
+      <button id="create">Create</button>
+      <div id="newSessionResult" class="small"></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>Live Multiplier</h3>
+    <div class="mult" id="mult">1.00x</div>
+    <div id="sessionInfo" class="small"></div>
+  </div>
+
+  <div class="card">
+    <h3>Sessions</h3>
+    <div id="sessionsList" class="small"></div>
+  </div>
+
+  <div class="card">
+    <h3>Users / Balance</h3>
+    <div class="flex" style="align-items:flex-start;">
+      <div style="flex:1; min-width:300px;">
+        <label>User ID: <input id="userId" placeholder="Discord user id"></label>
+        <label>Amount: <input id="amount" placeholder="e.g. 10"></label>
+        <button id="deposit">Deposit</button>
+        <button id="withdraw">Withdraw</button>
+        <div id="userBalance" class="small"></div>
+      </div>
+      <div style="flex:1;">
+        <h4>Known users</h4>
+        <div id="usersList"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>History (recent)</h3>
+    <div id="history"></div>
+  </div>
+
+<script>
+  const socket = io();
+  const multEl = document.getElementById('mult');
+  let activeSessionId = null;
+
+  socket.on('connect', () => {
+    socket.emit('getSessions');
+    socket.emit('getUsers');
+  });
+
+  socket.on('sessions', (list) => {
+    const t = document.getElementById('sessionsList');
+    if (!list || list.length === 0) { t.innerHTML = '<div class="small">No sessions</div>'; return; }
+    t.innerHTML = list.map(s => `<div style="margin-bottom:6px;">id:${s.id} — ${s.status} — preview ${s.crashPreview} <button onclick="startSession('${s.id}')">Start</button> <button onclick="watchSession('${s.id}')">Watch</button></div>`).join('');
+  });
+
+  socket.on('users', (data) => {
+    updateUsersList(data);
+  });
+
+  socket.on('balanceUpdate', (d) => {
+    // update UI for that user
+    const ub = document.getElementById('userBalance');
+    const userId = document.getElementById('userId').value.trim();
+    if (userId === d.userId) ub.innerText = `Balance: ${d.balance}`;
+    // refresh known users list
+    fetch('/api/users').then(r=>r.json()).then(updateUsersList);
+  });
+
+  socket.on('playerBet', (d) => {
+    // optional notification
+    console.log('playerBet', d);
+  });
+
+  socket.on('roundStart', (d) => {
+    activeSessionId = d.sessionId;
+    multEl.textContent = '1.00x';
+    document.getElementById('sessionInfo').textContent = 'Running — crash preview: ' + d.crash;
+  });
+
+  socket.on('multiplier', (d) => {
+    if (activeSessionId && d.sessionId === activeSessionId) {
+      multEl.textContent = d.multiplier.toFixed(2) + 'x';
+    }
+  });
+
+  socket.on('roundEnd', (d) => {
+    if (activeSessionId === d.sessionId) {
+      multEl.textContent = d.crashAt.toFixed(2) + 'x (crashed)';
+      activeSessionId = null;
+    }
+  });
+
+  async function loadHistory() {
+    const res = await fetch('/api/history');
+    const data = await res.json();
+    document.getElementById('history').innerHTML = data.slice(0,20).map(h => `<div>${new Date(h.createdAt).toLocaleString()} — crashed at ${Number(h.crashAt).toFixed(2)}x</div>`).join('');
+  }
+  loadHistory();
+
+  document.getElementById('create').addEventListener('click', async () => {
+    const channelId = document.getElementById('channelId').value.trim();
+    const guildId = document.getElementById('guildId').value.trim();
+    const roundLength = Number(document.getElementById('roundLength').value) || 8000;
+    const res = await fetch('/api/create', { method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({ channelId, guildId, roundLength }) });
+    const data = await res.json();
+    if (data.error) return alert(data.error);
+    document.getElementById('newSessionResult').innerText = 'Session created: ' + data.id + ' — preview crash ' + data.crashMultiplier;
+    socket.emit('getSessions');
+    loadHistory();
+  });
+
+  async function startSession(sessionId) {
+    const res = await fetch('/api/start', { method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({ sessionId }) });
+    const d = await res.json();
+    if (d.error) alert(d.error);
+    else { alert('Started ' + sessionId); }
+  }
+
+  function watchSession(id) {
+    activeSessionId = id;
+    document.getElementById('sessionInfo').textContent = 'Watching session ' + id;
+  }
+
+  // Deposit / Withdraw UI
+  document.getElementById('deposit').addEventListener('click', async () => {
+    const userId = document.getElementById('userId').value.trim();
+    const amount = Number(document.getElementById('amount').value);
+    if (!userId || !isFinite(amount) || amount <= 0) return alert('Provide userId and positive amount');
+    const res = await fetch('/api/deposit', { method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({ userId, amount }) });
+    const d = await res.json();
+    if (d.error) return alert(d.error);
+    document.getElementById('userBalance').innerText = `Balance: ${d.balance}`;
+    fetch('/api/users').then(r=>r.json()).then(updateUsersList);
+  });
+
+  document.getElementById('withdraw').addEventListener('click', async () => {
+    const userId = document.getElementById('userId').value.trim();
+    const amount = Number(document.getElementById('amount').value);
+    if (!userId || !isFinite(amount) || amount <= 0) return alert('Provide userId and positive amount');
+    const res = await fetch('/api/withdraw', { method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({ userId, amount }) });
+    const d = await res.json();
+    if (d.error) return alert(d.error);
+    document.getElementById('userBalance').innerText = `Balance: ${d.balance}`;
+    fetch('/api/users').then(r=>r.json()).then(updateUsersList);
+  });
+
+  document.getElementById('userId').addEventListener('input', async () => {
+    const userId = document.getElementById('userId').value.trim();
+    if (!userId) return document.getElementById('userBalance').innerText = '';
+    const res = await fetch('/api/balance/' + userId);
+    const d = await res.json();
+    if (!d.error) document.getElementById('userBalance').innerText = `Balance: ${d.balance}`;
+  });
+
+  function updateUsersList(data) {
+    const el = document.getElementById('usersList');
+    const keys = Object.keys(data || {});
+    if (keys.length === 0) return el.innerHTML = '<div class="small">No known users</div>';
+    el.innerHTML = '<table><thead><tr><th>UserId</th><th>Balance</th></tr></thead><tbody>' + keys.map(k => `<tr><td>${k}</td><td>${data[k].balance}</td></tr>`).join('') + '</tbody></table>';
+  }
+
+  // initial fetch
+  fetch('/api/sessions').then(r=>r.json()).then(list => socket.emit('sessions', list));
+  fetch('/api/users').then(r=>r.json()).then(updateUsersList);
+</script>
+</body>
+</html>
